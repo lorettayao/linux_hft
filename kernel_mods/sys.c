@@ -2655,6 +2655,20 @@ COMPAT_SYSCALL_DEFINE1(sysinfo, struct compat_sysinfo __user *, info)
 /* HFT Project: System Call Entry */
 SYSCALL_DEFINE1(hft_init, int, mode)
 {
-    printk(KERN_INFO "HFT: System Call Initialized with mode %d!\n", mode);
-    return 77; // 回傳一個特別的數字來驗證成功
+    if (mode == 999) {
+        printk(KERN_INFO "HFT: [START] Entering 5-second Busy Loop...\n");
+        
+        // 使用 jiffies 來計算時間，避免在核心裡面無限死迴圈
+        unsigned long timeout = jiffies + (5 * HZ); // 5秒後跳出
+        
+        while (time_before(jiffies, timeout)) {
+            cpu_relax(); // 降低功耗並優化忙碌等待
+        }
+        
+        printk(KERN_INFO "HFT: [END] Busy Loop Finished.\n");
+        return 0;
+    }
+    
+    printk(KERN_INFO "HFT: Normal mode %d\n", mode);
+    return 77;
 }
