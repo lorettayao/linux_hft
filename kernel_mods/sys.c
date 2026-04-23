@@ -129,6 +129,25 @@
  * this is where the system-wide overflow UID and GID are defined, for
  * architectures that now have 32-bit UID/GID but didn't in the past
  */
+#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/miscdevice.h>
+
+void *hft_shared_mem = NULL;
+static int hft_mmap(struct file *file, struct vm_area_struct *vma) {
+    return remap_pfn_range(vma, vma->vm_start, virt_to_phys(hft_shared_mem) >> PAGE_SHIFT,
+                          vma->vm_end - vma->vm_start, vma->vm_page_prot);
+}
+
+static const struct file_operations hft_fops = {
+    .mmap = hft_mmap,
+};
+
+static struct miscdevice hft_dev = {
+    .minor = MISC_DYNAMIC_MINOR,
+    .name = "hft",
+    .fops = &hft_fops,
+};
 
 int overflowuid = DEFAULT_OVERFLOWUID;
 int overflowgid = DEFAULT_OVERFLOWGID;
@@ -2651,34 +2670,15 @@ COMPAT_SYSCALL_DEFINE1(sysinfo, struct compat_sysinfo __user *, info)
 
 #endif /* CONFIG_COMPAT */
 
-
-SYSCALL_DEFINE1(hft_init, int, mode)
-{
-    unsigned long long k_entry = get_cycles();
-    
-    if (mode == 1) {
-        // 我們只需要這個時間點，印出來後續在外面手動算
-        printk(KERN_INFO "HFT: Entry Ticks: %llu\n", k_entry);
-        return 77;
-    }
-    if (mode == 999) {
-        unsigned long long start, end;
-        unsigned long timeout = jiffies + (2 * HZ); // 改成 2 秒比較快
-
-        start = get_cycles(); // 紀錄開始時脈
-        
-        printk(KERN_INFO "HFT: Starting Polling... Ticks: %llu\n", start);
-        
-        while (time_before(jiffies, timeout)) {
-            cpu_relax();
+SYSCALL_DEFINE1(hft_init, int, mode) {
+    if (mode == 555) {
+        if (!hft_shared_mem) {
+            hft_shared_mem = (void *)__get_free_page(GFP_KERNEL);
+            sprintf((char *)hft_shared_mem, "HFT_GOD_MODE_ON");
+            misc_register(&hft_dev); // 註冊 /dev/hft
+            printk(KERN_INFO "HFT: Device /dev/hft created!\n");
         }
-        
-        end = get_cycles(); // 紀錄結束時脈
-        
-        printk(KERN_INFO "HFT: Polling Finished. Ticks: %llu\n", end);
-        printk(KERN_INFO "HFT: Total CPU Cycles consumed: %llu\n", end - start);
-        
         return 0;
     }
     return 77;
-}/* HFT Project: System Call Entry */
+}
