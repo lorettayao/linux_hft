@@ -1,8 +1,4 @@
-My apologies! I understand—you want the raw Markdown code in a **copy-pasteable code block** so the formatting remains intact when you save it as `README.md`.
 
-Here is the complete project documentation in `.md` format:
-
-```markdown
 # HFT-Kernel-Sandbox: Low-Latency Zero-Copy Infrastructure
 
 A high-performance Linux Kernel experiment focused on minimizing User-Kernel communication overhead. This project implements a custom system call and a shared-memory character device to achieve "Zero-Copy" data transfer—a critical requirement in High-Frequency Trading (HFT) systems where every nanosecond counts.
