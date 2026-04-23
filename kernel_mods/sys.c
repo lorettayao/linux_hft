@@ -149,6 +149,23 @@ static struct miscdevice hft_dev = {
     .fops = &hft_fops,
 };
 
+#include <linux/timer.h>
+
+struct timer_list hft_timer;
+unsigned long long *shared_cycle_ptr; 
+
+// simulate the package arrival
+void hft_timer_callback(struct timer_list *t) {
+    if (hft_shared_mem) {
+        shared_cycle_ptr = (unsigned long long *)hft_shared_mem;
+        *shared_cycle_ptr = get_cycles(); // current arrival stamp
+    }
+    // reset time stamp
+    mod_timer(&hft_timer, jiffies + msecs_to_jiffies(100));
+}
+
+
+
 int overflowuid = DEFAULT_OVERFLOWUID;
 int overflowgid = DEFAULT_OVERFLOWGID;
 
@@ -2675,10 +2692,17 @@ SYSCALL_DEFINE1(hft_init, int, mode) {
         if (!hft_shared_mem) {
             hft_shared_mem = (void *)__get_free_page(GFP_KERNEL);
             sprintf((char *)hft_shared_mem, "HFT_GOD_MODE_ON");
-            misc_register(&hft_dev); // 註冊 /dev/hft
+            misc_register(&hft_dev); // register  /dev/hft
             printk(KERN_INFO "HFT: Device /dev/hft created!\n");
         }
         return 0;
     }
+	// dynamic: packet simulation
+	if (mode == 123) {
+		timer_setup(&hft_timer, hft_timer_callback, 0);
+		mod_timer(&hft_timer, jiffies + msecs_to_jiffies(100));
+		printk(KERN_INFO "HFT: Kernel Packet Simulator Started!\n");
+		return 0;
+	}
     return 77;
 }
