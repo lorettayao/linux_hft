@@ -2654,6 +2654,13 @@ COMPAT_SYSCALL_DEFINE1(sysinfo, struct compat_sysinfo __user *, info)
 
 SYSCALL_DEFINE1(hft_init, int, mode)
 {
+    unsigned long long k_entry = get_cycles();
+    
+    if (mode == 1) {
+        // 我們只需要這個時間點，印出來後續在外面手動算
+        printk(KERN_INFO "HFT: Entry Ticks: %llu\n", k_entry);
+        return 77;
+    }
     if (mode == 999) {
         unsigned long long start, end;
         unsigned long timeout = jiffies + (2 * HZ); // 改成 2 秒比較快
