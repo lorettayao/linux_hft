@@ -4,15 +4,17 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <sys/syscall.h>
-#include <errno.h>
-#include <string.h>
 
-/**
- * RDTSC - Read Time Stamp Counter
- * Grabs the current CPU cycle count with nanosecond-level precision.
- */
-static inline unsigned long long rdtsc(void) {
+// static inline unsigned long long rdtscp(void) {
+//     unsigned int lo, hi, aux;
+//     __asm__ __volatile__ ("rdtscp" : "=a" (lo), "=d" (hi), "=c" (aux));
+//     return ((unsigned long long)hi << 32) | lo;
+// }
+
+static inline unsigned long long rdtsc_safe(void) {
     unsigned int lo, hi;
+    // 使用 mfence 確保前面的指令都執行完了，達到類似 rdtscp 的效果
+    __asm__ __volatile__ ("mfence" ::: "memory"); 
     __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
     return ((unsigned long long)hi << 32) | lo;
 }
@@ -20,64 +22,37 @@ static inline unsigned long long rdtsc(void) {
 int main() {
     int fd;
     void *mmap_ptr;
-    // We use volatile to prevent the compiler from optimizing away the loop
-    volatile unsigned long long *shared_data; 
+    volatile unsigned long long *shared_data;
     unsigned long long last_val = 0;
-    int packet_count = 0;
+    int samples = 0;
+    const int MAX_SAMPLES = 1000; // Collect 1k data points
 
-    printf("--- HFT Latency Extension: Real-Time Packet Simulator ---\n");
+    FILE *csv = fopen("latency_data.csv", "w");
+    fprintf(csv, "sample,latency\n");
 
-    // 1. Initialize the Kernel Side (Mode 555 for device, Mode 123 for Timer)
-    if (syscall(548, 555) != 0) {
-        perror("Syscall 555 (Device Init) failed");
-        return 1;
-    }
-    
-    if (syscall(548, 123) != 0) {
-        perror("Syscall 123 (Timer Start) failed");
-        return 1;
-    }
-    printf("[System] Kernel Device and Timer initialized.\n");
+    // Init Syscalls
+    syscall(548, 555);
+    syscall(548, 123);
 
-    // 2. Open and Map the Shared Memory
     fd = open("/dev/hft", O_RDWR);
-    if (fd < 0) {
-        printf("Error: Cannot open /dev/hft (errno: %d). Did you mknod?\n", errno);
-        return 1;
-    }
-
     mmap_ptr = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (mmap_ptr == MAP_FAILED) {
-        perror("mmap failed");
-        close(fd);
-        return 1;
-    }
-
     shared_data = (unsigned long long *)mmap_ptr;
-    printf("[System] Shared memory mapped at %p. Starting Polling...\n", mmap_ptr);
-    printf("Press Ctrl+C to stop.\n\n");
 
-    // 3. The "Hot Loop" (HFT Core Logic)
-    // This loop consumes 100% CPU on one core to ensure 0ns wakeup latency.
-    while (packet_count < 20) {
+    printf("Logging 1k samples to latency_data.csv...\n");
+
+    while (samples < MAX_SAMPLES) {
         unsigned long long current_kernel_time = *shared_data;
-
-        // Check if the kernel has updated the timestamp
         if (current_kernel_time != last_val && current_kernel_time != 0) {
-            unsigned long long user_receive_time = rdtsc();
-            unsigned long long latency = user_receive_time - current_kernel_time;
-
-            packet_count++;
-            printf("[%d] Packet Arrived! Kernel Ticks: %llu | Latency: %llu cycles\n", 
-                    packet_count, current_kernel_time, latency);
-
+            unsigned long long user_receive_time = rdtsc_safe();
+            if (last_val != 0) { // Skip the first "cold" sample
+                fprintf(csv, "%d,%llu\n", samples, user_receive_time - current_kernel_time);
+                samples++;
+            }
             last_val = current_kernel_time;
         }
     }
 
-    printf("\nBenchmark Finished. Summary: Captured %d packets via Zero-Copy Polling.\n", packet_count);
-
-    munmap(mmap_ptr, 4096);
-    close(fd);
+    fclose(csv);
+    printf("Done. Transfer this file to your host to plot.\n");
     return 0;
 }
