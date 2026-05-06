@@ -86,3 +86,8 @@ cat /proc/misc | grep hft
 mknod /dev/hft c 10 60
 comp_test
 ```
+
+## Performance Results
+Managed to achieve a deterministic P50 latency of ~12,000 cycles with CPU isolation.
+
+![Latency Distribution](hft_latency_report.png)
