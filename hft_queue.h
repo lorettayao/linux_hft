@@ -20,4 +20,11 @@ struct hft_ring {
     struct hft_msg buffer[RING_SIZE] __attribute__((aligned(CACHE_LINE)));
 };
 
+static inline unsigned long long rdtsc_safe(void) {
+    unsigned int lo, hi;
+    __asm__ __volatile__ ("mfence" ::: "memory"); 
+    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
+    return ((unsigned long long)hi << 32) | lo;
+}
+
 #endif

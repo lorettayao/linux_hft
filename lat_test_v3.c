@@ -6,12 +6,6 @@
 #include <sys/syscall.h>
 #include "hft_queue.h"
 
-static inline unsigned long long rdtsc_safe(void) {
-    unsigned int lo, hi;
-    __asm__ __volatile__ ("mfence" ::: "memory"); 
-    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
-    return ((unsigned long long)hi << 32) | lo;
-}
 
 int main() {
     int fd;

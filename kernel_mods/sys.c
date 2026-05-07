@@ -129,66 +129,60 @@
  * this is where the system-wide overflow UID and GID are defined, for
  * architectures that now have 32-bit UID/GID but didn't in the past
  */
-// #include <linux/mm.h>
-// #include <linux/slab.h>
-// #include <linux/miscdevice.h>
-
-// void *hft_shared_mem = NULL;
-// static int hft_mmap(struct file *file, struct vm_area_struct *vma) {
-//     return remap_pfn_range(vma, vma->vm_start, virt_to_phys(hft_shared_mem) >> PAGE_SHIFT,
-//                           vma->vm_end - vma->vm_start, vma->vm_page_prot);
-// }
-
-// static const struct file_operations hft_fops = {
-//     .mmap = hft_mmap,
-// };
-
-// static struct miscdevice hft_dev = {
-//     .minor = MISC_DYNAMIC_MINOR,
-//     .name = "hft",
-//     .fops = &hft_fops,
-// };
-
-// #include <linux/timer.h>
-
-// struct timer_list hft_timer;
-// unsigned long long *shared_cycle_ptr; 
-
-// // simulate the package arrival
-// void hft_timer_callback(struct timer_list *t) {
-//     if (hft_shared_mem) {
-//         shared_cycle_ptr = (unsigned long long *)hft_shared_mem;
-//         *shared_cycle_ptr = get_cycles(); // current arrival stamp
-//     }
-//     // reset time stamp
-//     mod_timer(&hft_timer, jiffies + msecs_to_jiffies(100));
-// }
-
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/miscdevice.h>
 #include <linux/timer.h>
-#include "hft_queue.h" // Include our new shared structure
+#include <linux/wait.h>
+#include <linux/uaccess.h>
+#include "hft_queue.h"
 
-// Global pointers for the ring buffer
+/* --- 1. 全域變數與同步原語 --- */
 struct hft_ring *ring = NULL;
 unsigned int ring_order = 0;
 
-// Update mmap to handle multiple pages
+// Standard Read 專用的等待佇列
+DECLARE_WAIT_QUEUE_HEAD(hft_wq);
+static int data_ready = 0;
+static unsigned long long last_event_time = 0;
+
+/* --- 2. 驅動程式操作函式 --- */
+
+// [v3.0 核心] 讓 User-space 直接映射 Ring Buffer
 static int hft_mmap(struct file *file, struct vm_area_struct *vma) {
     unsigned long len = vma->vm_end - vma->vm_start;
     
-    // Safety check: ensure user isn't mapping more than we allocated
+    // 安全檢查：確保映射大小不超過分配的大小
     if (len > (PAGE_SIZE << ring_order))
         return -EINVAL;
 
     return remap_pfn_range(vma, vma->vm_start, 
-                           virt_to_phys(ring) >> PAGE_SHIFT,
-                           len, vma->vm_page_prot);
+                          virt_to_phys(ring) >> PAGE_SHIFT,
+                          len, vma->vm_page_prot);
 }
 
+// [Standard 核心] 傳統的阻塞讀取路徑
+static ssize_t hft_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
+    // 程式會在這裡掛起，交出 CPU 使用權，直到 timer 叫醒它
+    if (wait_event_interruptible(hft_wq, data_ready == 1)) {
+        return -ERESTARTSYS;
+    }
+
+    data_ready = 0; // 消費掉這次事件
+
+    // 將發令槍響的時間點傳給 User-space
+    if (copy_to_user(buf, &last_event_time, sizeof(last_event_time))) {
+        return -EFAULT;
+    }
+
+    return sizeof(last_event_time);
+}
+
+/* --- 3. 定義設備接口 --- */
 static const struct file_operations hft_fops = {
+    .owner = THIS_MODULE,
     .mmap = hft_mmap,
+    .read = hft_read,
 };
 
 static struct miscdevice hft_dev = {
@@ -197,47 +191,31 @@ static struct miscdevice hft_dev = {
     .fops = &hft_fops,
 };
 
+/* --- 4. 定時器回呼：發令槍 --- */
 struct timer_list hft_timer;
 
-// The New Producer Logic
 void hft_timer_callback(struct timer_list *t) {
+    unsigned long long now = get_cycles();
+    last_event_time = now; // 紀錄發令時間
+
     if (ring) {
-        // 1. Check if buffer is full: (tail + 1) == head
+        /* [路徑 A: v3.0 Ring Buffer] 
+           直接寫入記憶體，User-space 的 Busy-poll 會第一時間看到 */
         unsigned long next_tail = (ring->tail + 1) & (RING_SIZE - 1);
-        
         if (next_tail != ring->head) {
-            // 2. Write data to the current tail slot
             struct hft_msg *msg = &ring->buffer[ring->tail];
-            msg->kernel_ts = get_cycles();
-            msg->dummy_data = ring->tail;
-
-            // 3. Write Memory Barrier: Ensure data is written before tail moves
-            // This prevents the user-space from reading a half-written message
-            smp_wmb(); 
-
-            // 4. Update the tail
+            msg->kernel_ts = now;
+            smp_wmb(); // 確保資料先寫入，index 後移動
             ring->tail = next_tail;
         }
-    }
-    // Set to 1ms for high-frequency testing
-    mod_timer(&hft_timer, jiffies + msecs_to_jiffies(1));
-}
 
-// In your initialization function (where you handle syscall 548 mode 123):
-void init_hft_subsystem(void) {
-    if (!ring) {
-        ring_order = get_order(sizeof(struct hft_ring));
-        ring = (struct hft_ring *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, ring_order);
-        
-        if (ring) {
-            ring->head = 0;
-            ring->tail = 0;
-            pr_info("HFT: Ring buffer allocated at order %d\n", ring_order);
-        }
+        /* [路徑 B: Standard Read]
+           叫醒在 wait_queue 中睡覺的進程 */
+        data_ready = 1;
+        wake_up_interruptible(&hft_wq);
     }
     
-    // Start the timer
-    timer_setup(&hft_timer, hft_timer_callback, 0);
+    // 週期性觸發 (1ms)
     mod_timer(&hft_timer, jiffies + msecs_to_jiffies(1));
 }
 
@@ -2762,65 +2740,38 @@ COMPAT_SYSCALL_DEFINE1(sysinfo, struct compat_sysinfo __user *, info)
 
 #endif /* CONFIG_COMPAT */
 
-// SYSCALL_DEFINE1(hft_init, int, mode) {
-//     if (mode == 555) {
-//         if (!hft_shared_mem) {
-//             hft_shared_mem = (void *)__get_free_page(GFP_KERNEL);
-//             sprintf((char *)hft_shared_mem, "HFT_GOD_MODE_ON");
-//             misc_register(&hft_dev); // register  /dev/hft
-//             printk(KERN_INFO "HFT: Device /dev/hft created!\n");
-//         }
-//         return 0;
-//     }
-// 	// dynamic: packet simulation
-// 	if (mode == 123) {
-// 		timer_setup(&hft_timer, hft_timer_callback, 0);
-// 		mod_timer(&hft_timer, jiffies + msecs_to_jiffies(100));
-// 		printk(KERN_INFO "HFT: Kernel Packet Simulator Started!\n");
-// 		return 0;
-// 	}
-//     return 77;
-// }
-
 SYSCALL_DEFINE1(hft_init, int, mode) {
-    // Mode 555: Hardware/Device Initialization
+    // Mode 555: 初始化 Ring Buffer 與 註冊設備
     if (mode == 555) {
-        if (!ring) {  // Changed from hft_shared_mem to ring
-            // 1. Calculate how many pages we need for the large struct
+        if (!ring) {
             ring_order = get_order(sizeof(struct hft_ring));
-            
-            // 2. Allocate contiguous physical pages
             ring = (struct hft_ring *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, ring_order);
             
-            if (!ring) {
-                printk(KERN_ERR "HFT: Memory allocation failed!\n");
-                return -ENOMEM;
-            }
+            if (!ring) return -ENOMEM;
 
-            // 3. Initialize the pointers
             ring->head = 0;
             ring->tail = 0;
 
-            // 4. Register the device node
-            misc_register(&hft_dev); 
-            printk(KERN_INFO "HFT: Device /dev/hft created! (Order: %d, Size: %lu bytes)\n", 
-                   ring_order, sizeof(struct hft_ring));
+            if (misc_register(&hft_dev)) {
+                free_pages((unsigned long)ring, ring_order);
+                return -EAGAIN;
+            }
+            printk(KERN_INFO "HFT v3.1: Ring Buffer allocated and /dev/hft registered.\n");
         }
         return 0;
     }
 
-    // Mode 123: Start the Packet Simulator
+    // Mode 123: 啟動計時器 (發令槍)
     if (mode == 123) {
-        if (!ring) {
-            printk(KERN_ERR "HFT: Cannot start timer! Run mode 555 first.\n");
-            return -1;
-        }
+        if (!ring) return -1;
         timer_setup(&hft_timer, hft_timer_callback, 0);
-        // Set to 1ms for the new high-speed queue testing
         mod_timer(&hft_timer, jiffies + msecs_to_jiffies(1));
-        printk(KERN_INFO "HFT: Kernel Packet Simulator Started (1ms interval)!\n");
+        printk(KERN_INFO "HFT v3.1: Timer started.\n");
         return 0;
     }
+
+    // Mode 777: 原始 Syscall 測試
+    if (mode == 777) return (long)get_cycles();
 
     return 77;
 }
