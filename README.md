@@ -88,6 +88,6 @@ comp_test
 ```
 
 ## Performance Results
-Managed to achieve a deterministic P50 latency of ~12,000 cycles with CPU isolation.
+Managed to achieve a deterministic P50 latency of ~8,190 cycles with CPU isolation.
 
-![Latency Distribution](hft_latency_report.png)
+![Latency Distribution](./lat_data/lat_v3_pin.png)
