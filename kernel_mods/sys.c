@@ -129,14 +129,62 @@
  * this is where the system-wide overflow UID and GID are defined, for
  * architectures that now have 32-bit UID/GID but didn't in the past
  */
+// #include <linux/mm.h>
+// #include <linux/slab.h>
+// #include <linux/miscdevice.h>
+
+// void *hft_shared_mem = NULL;
+// static int hft_mmap(struct file *file, struct vm_area_struct *vma) {
+//     return remap_pfn_range(vma, vma->vm_start, virt_to_phys(hft_shared_mem) >> PAGE_SHIFT,
+//                           vma->vm_end - vma->vm_start, vma->vm_page_prot);
+// }
+
+// static const struct file_operations hft_fops = {
+//     .mmap = hft_mmap,
+// };
+
+// static struct miscdevice hft_dev = {
+//     .minor = MISC_DYNAMIC_MINOR,
+//     .name = "hft",
+//     .fops = &hft_fops,
+// };
+
+// #include <linux/timer.h>
+
+// struct timer_list hft_timer;
+// unsigned long long *shared_cycle_ptr; 
+
+// // simulate the package arrival
+// void hft_timer_callback(struct timer_list *t) {
+//     if (hft_shared_mem) {
+//         shared_cycle_ptr = (unsigned long long *)hft_shared_mem;
+//         *shared_cycle_ptr = get_cycles(); // current arrival stamp
+//     }
+//     // reset time stamp
+//     mod_timer(&hft_timer, jiffies + msecs_to_jiffies(100));
+// }
+
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/miscdevice.h>
+#include <linux/timer.h>
+#include "hft_queue.h" // Include our new shared structure
 
-void *hft_shared_mem = NULL;
+// Global pointers for the ring buffer
+struct hft_ring *ring = NULL;
+unsigned int ring_order = 0;
+
+// Update mmap to handle multiple pages
 static int hft_mmap(struct file *file, struct vm_area_struct *vma) {
-    return remap_pfn_range(vma, vma->vm_start, virt_to_phys(hft_shared_mem) >> PAGE_SHIFT,
-                          vma->vm_end - vma->vm_start, vma->vm_page_prot);
+    unsigned long len = vma->vm_end - vma->vm_start;
+    
+    // Safety check: ensure user isn't mapping more than we allocated
+    if (len > (PAGE_SIZE << ring_order))
+        return -EINVAL;
+
+    return remap_pfn_range(vma, vma->vm_start, 
+                           virt_to_phys(ring) >> PAGE_SHIFT,
+                           len, vma->vm_page_prot);
 }
 
 static const struct file_operations hft_fops = {
@@ -149,22 +197,49 @@ static struct miscdevice hft_dev = {
     .fops = &hft_fops,
 };
 
-#include <linux/timer.h>
-
 struct timer_list hft_timer;
-unsigned long long *shared_cycle_ptr; 
 
-// simulate the package arrival
+// The New Producer Logic
 void hft_timer_callback(struct timer_list *t) {
-    if (hft_shared_mem) {
-        shared_cycle_ptr = (unsigned long long *)hft_shared_mem;
-        *shared_cycle_ptr = get_cycles(); // current arrival stamp
+    if (ring) {
+        // 1. Check if buffer is full: (tail + 1) == head
+        unsigned long next_tail = (ring->tail + 1) & (RING_SIZE - 1);
+        
+        if (next_tail != ring->head) {
+            // 2. Write data to the current tail slot
+            struct hft_msg *msg = &ring->buffer[ring->tail];
+            msg->kernel_ts = get_cycles();
+            msg->dummy_data = ring->tail;
+
+            // 3. Write Memory Barrier: Ensure data is written before tail moves
+            // This prevents the user-space from reading a half-written message
+            smp_wmb(); 
+
+            // 4. Update the tail
+            ring->tail = next_tail;
+        }
     }
-    // reset time stamp
-    mod_timer(&hft_timer, jiffies + msecs_to_jiffies(100));
+    // Set to 1ms for high-frequency testing
+    mod_timer(&hft_timer, jiffies + msecs_to_jiffies(1));
 }
 
-
+// In your initialization function (where you handle syscall 548 mode 123):
+void init_hft_subsystem(void) {
+    if (!ring) {
+        ring_order = get_order(sizeof(struct hft_ring));
+        ring = (struct hft_ring *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, ring_order);
+        
+        if (ring) {
+            ring->head = 0;
+            ring->tail = 0;
+            pr_info("HFT: Ring buffer allocated at order %d\n", ring_order);
+        }
+    }
+    
+    // Start the timer
+    timer_setup(&hft_timer, hft_timer_callback, 0);
+    mod_timer(&hft_timer, jiffies + msecs_to_jiffies(1));
+}
 
 int overflowuid = DEFAULT_OVERFLOWUID;
 int overflowgid = DEFAULT_OVERFLOWGID;
@@ -2687,22 +2762,65 @@ COMPAT_SYSCALL_DEFINE1(sysinfo, struct compat_sysinfo __user *, info)
 
 #endif /* CONFIG_COMPAT */
 
+// SYSCALL_DEFINE1(hft_init, int, mode) {
+//     if (mode == 555) {
+//         if (!hft_shared_mem) {
+//             hft_shared_mem = (void *)__get_free_page(GFP_KERNEL);
+//             sprintf((char *)hft_shared_mem, "HFT_GOD_MODE_ON");
+//             misc_register(&hft_dev); // register  /dev/hft
+//             printk(KERN_INFO "HFT: Device /dev/hft created!\n");
+//         }
+//         return 0;
+//     }
+// 	// dynamic: packet simulation
+// 	if (mode == 123) {
+// 		timer_setup(&hft_timer, hft_timer_callback, 0);
+// 		mod_timer(&hft_timer, jiffies + msecs_to_jiffies(100));
+// 		printk(KERN_INFO "HFT: Kernel Packet Simulator Started!\n");
+// 		return 0;
+// 	}
+//     return 77;
+// }
+
 SYSCALL_DEFINE1(hft_init, int, mode) {
+    // Mode 555: Hardware/Device Initialization
     if (mode == 555) {
-        if (!hft_shared_mem) {
-            hft_shared_mem = (void *)__get_free_page(GFP_KERNEL);
-            sprintf((char *)hft_shared_mem, "HFT_GOD_MODE_ON");
-            misc_register(&hft_dev); // register  /dev/hft
-            printk(KERN_INFO "HFT: Device /dev/hft created!\n");
+        if (!ring) {  // Changed from hft_shared_mem to ring
+            // 1. Calculate how many pages we need for the large struct
+            ring_order = get_order(sizeof(struct hft_ring));
+            
+            // 2. Allocate contiguous physical pages
+            ring = (struct hft_ring *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, ring_order);
+            
+            if (!ring) {
+                printk(KERN_ERR "HFT: Memory allocation failed!\n");
+                return -ENOMEM;
+            }
+
+            // 3. Initialize the pointers
+            ring->head = 0;
+            ring->tail = 0;
+
+            // 4. Register the device node
+            misc_register(&hft_dev); 
+            printk(KERN_INFO "HFT: Device /dev/hft created! (Order: %d, Size: %lu bytes)\n", 
+                   ring_order, sizeof(struct hft_ring));
         }
         return 0;
     }
-	// dynamic: packet simulation
-	if (mode == 123) {
-		timer_setup(&hft_timer, hft_timer_callback, 0);
-		mod_timer(&hft_timer, jiffies + msecs_to_jiffies(100));
-		printk(KERN_INFO "HFT: Kernel Packet Simulator Started!\n");
-		return 0;
-	}
+
+    // Mode 123: Start the Packet Simulator
+    if (mode == 123) {
+        if (!ring) {
+            printk(KERN_ERR "HFT: Cannot start timer! Run mode 555 first.\n");
+            return -1;
+        }
+        timer_setup(&hft_timer, hft_timer_callback, 0);
+        // Set to 1ms for the new high-speed queue testing
+        mod_timer(&hft_timer, jiffies + msecs_to_jiffies(1));
+        printk(KERN_INFO "HFT: Kernel Packet Simulator Started (1ms interval)!\n");
+        return 0;
+    }
+
     return 77;
 }

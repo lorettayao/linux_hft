@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Load the data
-df = pd.read_csv('lat_data_1k.csv')
+df = pd.read_csv('./lat_data/lat_v3.csv')
 
 # Calculate statistics
 p50 = df['latency'].median()
@@ -36,5 +36,5 @@ plt.ylabel('Probability')
 plt.grid(True, which="both", ls="-", alpha=0.5)
 
 plt.tight_layout()
-plt.savefig('hft_latency_report.png')
+plt.savefig('./lat_data/lat_v3_pin.png')
 plt.show()

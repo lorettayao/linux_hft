@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 
+
 // static inline unsigned long long rdtscp(void) {
 //     unsigned int lo, hi, aux;
 //     __asm__ __volatile__ ("rdtscp" : "=a" (lo), "=d" (hi), "=c" (aux));
